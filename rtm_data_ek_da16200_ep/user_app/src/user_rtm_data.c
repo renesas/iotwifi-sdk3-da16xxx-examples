@@ -42,9 +42,12 @@
 #include "cma_rtm_data.h"
 #include "user_rtm_data.h"
 
+#include "util_api.h"
+#include "common_config.h"
+
 /* internal defines */
 #define USER_RTM_DATA_TASK_NAME       	"USER_RTM_DATA"
-#define USER_RTM_DATA_TASK_STACK_SZ   	(256 * 4)
+#define USER_RTM_DATA_TASK_STACK_SZ   	(512 * 4)
 #define USER_RTM_DATA_TASK_PRI        	OS_TASK_PRIORITY_USER
 
 #define USER_RTM_DATA_SLEEP_EV         	(1 << 0)
@@ -99,6 +102,166 @@ static CMA_STATUS_TYPE user_rtm_data_app_init(void)
     return CMA_STATUS_OK;
 }
 
+/**
+ * @brief Enable or disable the STA profile in DA16X00
+ *
+ * This function enables or disables the STA profile based on the input parameter.
+ * If enabling, it reads the configuration for "sta0" and performs necessary actions.
+ *
+ * @param enable 1 to enable the STA profile, 0 to disable it.
+ */
+void sta_profile_enable(uint8_t enable)
+{
+    da16x_set_config_int(DA16X_CONF_INT_STA_PROF_DISABLED, enable ? 0 : 1);
+}
+
+/**
+ * @brief Check if STA profile is disabled
+ *
+ * This function checks if the STA profile is disabled in DA16X00.
+ *
+ * @param disabled Pointer to an integer where the result will be stored (1 if disabled, 0 otherwise).
+ * @return Returns 1 if the operation was successful, otherwise returns 0.
+ */
+uint8_t sta_profile_disabled(int *disabled)
+{
+    return (da16x_get_config_int(DA16X_CONF_INT_STA_PROF_DISABLED, disabled) == CC_SUCCESS);
+}
+
+/**
+ * @brief Connect to a backup network.
+ *
+ * This function attempts to connect to a backup network by disabling the STA profile
+ * and then configuring the network settings for the backup network.
+ *
+ * @return CMA_STATUS_TYPE indicating success or failure of the operation.
+ */
+static CMA_STATUS_TYPE cma_rtm_data_connect_backup_network(void)
+{
+    int ret = CMA_STATUS_OK;
+    char *value_str = NULL;
+    value_str = pvPortMalloc(128);
+    if (value_str == NULL)  return CMA_STATUS_FAIL;
+
+    // Disable the STA profile to prevent it from interfering with the backup network connection.
+    LOG(LOG_INFO, "Disabling STA profile...");
+    sta_profile_enable(0);
+
+    // This function should implement the logic to connect to a backup network.
+    // For now, we will just simulate a successful connection.
+    LOG(LOG_INFO, "Connecting to backup network...");
+
+    ret = da16x_cli_reply("remove_network 0", NULL, NULL);
+    if (ret == CC_SUCCESS)
+    {
+        ret = da16x_cli_reply("add_network 0", NULL, NULL);
+    }
+
+    if (ret == CC_SUCCESS)
+    {
+        ret = da16x_cli_reply("set_network 0 ssid 'Alvin'", NULL, NULL);
+    }
+
+    if (ret == CC_SUCCESS)
+    {
+        ret = da16x_cli_reply("set_network 0 psk 'glasowk@2'", NULL, NULL);
+    }
+
+    if (ret == CC_SUCCESS)
+    {
+        ret = da16x_cli_reply("set_network 0 key_mgmt WPA-PSK", NULL, NULL);
+    }
+
+    if (ret == CC_SUCCESS)
+    {
+        ret = da16x_cli_reply("select_network 0", NULL, value_str);
+    }
+
+    LOG(LOG_INFO, "Network selection result: %s", value_str);
+    if (ret < 0 || strcmp(value_str, "FAIL") == 0) {
+        ret = CMA_STATUS_FAIL;
+    }
+    vPortFree(value_str);
+    return ret;
+}
+
+/**
+ * @brief Restore the primary network configuration.
+ *
+ * This function attempts to restore the primary network configuration by reading
+ * the SSID, encryption key, and authentication type from NVRAM and applying them
+ * to the network interface.
+ *
+ * @return CMA_STATUS_TYPE indicating success or failure of the operation.
+ */
+static CMA_STATUS_TYPE cma_rtm_data_restore_primary_network(void)
+{
+    int ret = CMA_STATUS_OK;
+    char *value = NULL;
+    char *value_str = NULL;
+    value_str = pvPortMalloc(128);
+    if (value_str == NULL)  return CMA_STATUS_FAIL;
+
+    LOG(LOG_INFO, "Restoring primary network configuration...");
+
+    ret = da16x_cli_reply("remove_network 0", NULL, NULL);
+    if (ret == CC_SUCCESS)
+    {
+        ret = da16x_cli_reply("add_network 0", NULL, NULL);
+    }
+
+    if (ret == CC_SUCCESS)
+    {
+        value = read_nvram_string(NVR_KEY_SSID_0);
+        if (value)
+        {
+            sprintf(value_str, "set_network 0 ssid %s", value);
+            ret = da16x_cli_reply(value_str, NULL, NULL);
+        }
+    }
+
+    if (ret == CC_SUCCESS)
+    {
+        value = read_nvram_string(NVR_KEY_ENCKEY_0);
+        if (value)
+        {
+            sprintf(value_str, "set_network 0 psk %s", value);
+            ret = da16x_cli_reply(value_str, NULL, NULL);
+        }
+    }
+
+    if (ret == CC_SUCCESS)
+    {
+        value = read_nvram_string(NVR_KEY_AUTH_TYPE_0);
+        if (value)
+        {
+            sprintf(value_str, "set_network 0 key_mgmt %s", value);
+            ret = da16x_cli_reply(value_str, NULL, NULL);
+        }
+    }
+
+    if (ret == CC_SUCCESS)
+    {
+        ret = da16x_cli_reply("select_network 0", NULL, value_str);
+    }
+
+    LOG(LOG_INFO, "Network selection result: %s", value_str);
+    if (ret < CC_SUCCESS || strcmp(value_str, "FAIL") == 0) {
+        ret = CMA_STATUS_FAIL;
+    }
+
+    // Re-enable the STA profile after restoring the primary network configuration.
+    // This is important to ensure that the device can connect to the primary network.
+    if (ret == CC_SUCCESS)
+    {
+        LOG(LOG_INFO, "Re-enabling STA profile...");
+        sta_profile_enable(1);
+    }
+
+    vPortFree(value_str);
+    return ret;
+}
+
 static void user_rtm_data_task(void *arg)
 {
     DA16X_UNUSED_ARG(arg);
@@ -137,8 +300,72 @@ static void user_rtm_data_task(void *arg)
 
         if (notif & USER_RTM_DATA_SLEEP_EV)
         {
-            g_user_buff->idx++;
-            cma_sleep_trigger (CMA_SLEEP_TYPE_3, USER_BRTM_DATA_SLEEP_TIME);
+            int disabled = 0;
+
+            // Check if the user buffer is initialized
+            if (g_user_buff == NULL)    return;
+
+            if (sta_profile_disabled(&disabled))
+            {
+                // If the STA profile is disabled, we will try to restore the primary network
+                // after 10 attempts, otherwise we will connect to the backup network.
+                if (disabled)
+                {
+                    LOG(LOG_INFO, "STA profile is disabled, index = %d", g_user_buff->idx++);
+                    if (g_user_buff->idx == 10)
+                    {
+                        LOG(LOG_INFO, "Attempting to restore primary network...");
+
+                        // Reset the index to 0 after 10 attempts
+                        g_user_buff->idx = 0;
+
+                        // Try to restore the primary network
+                        LOG(LOG_INFO, "Restoring primary network...");
+                        if (cma_rtm_data_restore_primary_network() == CMA_STATUS_OK)
+                        {
+                            // Successfully restored the primary network
+                            LOG(LOG_INFO, "Selected primary network successfully!");
+
+                            // trigger a sleep to allow the network to stabilize
+                            // the network will be restored after the sleep
+                            cma_sleep_trigger(CMA_SLEEP_TYPE_3, USER_BRTM_DATA_SLEEP_TIME);
+                        }
+                        else
+                        {
+                            // Failed to restore the primary network
+                            LOG(LOG_ERR, "Failed to select primary network!");
+                        }
+                    }
+                }
+                else
+                {
+                    // If the STA profile is enabled, we will try to connect to the backup network
+                    // after 10 attempts.
+                    LOG(LOG_INFO, "STA profile is enabled, index = %d", g_user_buff->idx++);
+                    if (g_user_buff->idx == 10)
+                    {
+                        // Try to connect to the backup network
+                        LOG(LOG_INFO, "Attempting to connect to backup network...");
+                        if (cma_rtm_data_connect_backup_network() == CMA_STATUS_OK)
+                        {
+                            // Successfully connected to the backup network
+                            LOG(LOG_INFO, "Selected backup network successfully!");
+                        }
+                        else
+                        {
+                            LOG(LOG_ERR, "Failed to select backup network!");
+                        }
+
+                        // It takes some time to connect to the backup network
+                        // Note: If the device goes to sleep before the connection is established,
+                        // it may not be able to connect to the backup network.
+                    }
+                }
+            } else {
+                // If we cannot check the STA profile status, log an error
+                g_user_buff->idx = 0; // Reset index if we cannot check the status
+                LOG(LOG_ERR, "Failed to check STA profile disabled status!");
+            }
         }
     }
 }
